@@ -1,0 +1,93 @@
+name: Scheduled Build and Release NuGet Package
+
+on:
+  schedule:
+    - cron: '0/30 * * * *'
+
+env:
+  PACKAGE_PATH: ${{ github.workspace }}/artifacts
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Check for changes in triggering repository
+        id: check_changes
+        run: |
+          latest_commit=$(curl -s https://api.github.com/repos/AfimilkRnD/HomeAssignmentTrigger/commits/main | jq -r '.sha')
+          echo "::set-output name=latest_commit::$latest_commit"
+
+      - name: Compare with last known commit
+        id: compare_commits
+        run: |
+          if [ -f .last_known_commit ]; then
+            last_known_commit=$(cat .last_known_commit)
+          else
+            last_known_commit=""
+          fi
+          echo "last known commit: $last_known_commit"
+          echo "latest commit: ${{ steps.check_changes.outputs.latest_commit }}"
+          if [ "$last_known_commit" != "${{ steps.check_changes.outputs.latest_commit }}" ]; then
+            echo "There are new changes."
+            echo "${{ steps.check_changes.outputs.latest_commit }}" > .last_known_commit
+            echo "::set-output name=changes_detected::true"
+          else
+            echo "No new changes."
+            echo "::set-output name=changes_detected::false"
+          fi
+
+      - name: Restore dependencies
+        if: steps.compare_commits.outputs.changes_detected == 'true'
+        run: dotnet restore src/InterviewTask.sln
+
+      - name: Build
+        if: steps.compare_commits.outputs.changes_detected == 'true'
+        run: dotnet build src/InterviewTask.sln --configuration Release --no-restore
+
+      - name: Pack
+        if: steps.compare_commits.outputs.changes_detected == 'true'
+        run: dotnet pack src/InterviewTask/InterviewTask.csproj --configuration Release --no-build --output ${{ env.PACKAGE_PATH }}
+
+      - name: Get current version
+        if: steps.compare_commits.outputs.changes_detected == 'true'
+        id: get_version
+        run: |
+          latest_version=$(git tag --sort=-v:refname | head -n 1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ -z "$latest_version" ]; then
+            new_version="1.0.0"
+          else
+            echo "$(git describe --tags --abbrev=0 | awk -F. '{print $1"."$2"."$3+1}')" > version.txt
+          fi
+          echo "::set-output name=version::$(cat version.txt)"
+        shell: bash
+
+      - name: Create Release
+        if: steps.compare_commits.outputs.changes_detected == 'true'
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          release_name: Release v${{ steps.get_version.outputs.version }}
+          draft: false
+          prerelease: false
+
+      - name: Find .nupkg file
+        id: find_nupkg
+        run: echo "::set-output name=nupkg_file::$(find ${{ env.PACKAGE_PATH }} -name '*.nupkg' -type f)"
+
+      - name: Upload NuGet package to release
+        if: steps.compare_commits.outputs.changes_detected == 'true'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.find_nupkg.outputs.nupkg_file }}
+          asset_name: mypackage.${{ steps.get_version.outputs.version }}.nupkg
+          asset_content_type: application/zip

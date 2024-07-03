@@ -1,0 +1,64 @@
+name: Build and Release NuGet Package
+
+on:
+  repository_dispatch:
+    types:
+      - trigger-build
+
+env:
+  PACKAGE_PATH: ${{ github.workspace }}/artifacts
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v2
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore src/InterviewTask.sln
+
+      - name: Build
+        run: dotnet build src/InterviewTask.sln --configuration Release --no-restore
+
+      - name: Pack
+        id: pack
+        run: dotnet pack src/InterviewTask/InterviewTask.csproj --configuration Release --no-build --output ${{ env.PACKAGE_PATH }}
+
+      - name: Get current version
+        id: get_version
+        run: |
+          echo "$(git describe --tags --abbrev=0 | awk -F. '{print $1"."$2"."$3+1}')" > version.txt
+          echo "::set-output name=version::$(cat version.txt)"
+        shell: bash
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          release_name: Release v${{ steps.get_version.outputs.version }}
+          draft: false
+          prerelease: false
+
+      - name: Find .nupkg file
+        id: find_nupkg
+        run: echo "::set-output name=nupkg_file::$(find ${{ env.PACKAGE_PATH }} -name '*.nupkg' -type f)"
+
+      - name: Upload NuGet package to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.find_nupkg.outputs.nupkg_file }}
+          asset_name: mypackage.${{ steps.get_version.outputs.version }}.nupkg
+          asset_content_type: application/zip
